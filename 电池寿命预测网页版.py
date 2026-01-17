@@ -47,8 +47,8 @@ class FitConfig:
     use_efc: bool = True
     bootstrap_n: int = 100
     random_seed: int = 42
-    temp_min_c: float = 30.0  # 过滤原始测试数据：仅拟合恒温区间数据
-    temp_max_c: float = 35.0
+    temp_min_c: float = 20.0  # 过滤原始测试数据：仅拟合恒温区间数据
+    temp_max_c: float = 55.0
 
 def compute_features(df: pd.DataFrame, cmap: ColumnMap, manual_Q0: Optional[float] = None) -> Tuple[pd.DataFrame, float, str]:
     """
@@ -260,7 +260,7 @@ def main():
     with col1:
         st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 核心参数配置</h4>", unsafe_allow_html=True)
         # ✅ 新增：手动输入额定容量Q0，留空则自动取最大值
-        manual_Q0 = st.number_input("额定容量 Q0 (Ah)", min_value=0.1, max_value=50.0, value=None, step=0.01, format="%.2f", help="留空则自动取实测容量最大值，已知额定值建议手动输入")
+        manual_Q0 = st.number_input("额定容量 Q0 (Ah)", min_value=0.1, max_value=1000.0, value=None, step=0.01, format="%.2f", help="留空则自动取实测容量最大值，已知额定值建议手动输入")
         target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
         temp_c_ref = st.number_input("工况温度(℃)", min_value=0.0, max_value=60.0, value=25.0, step=0.5, format="%.1f")
         dod_ref = st.number_input("放电深度(DoD)", min_value=0.0, max_value=1.0, value=1.0, step=0.01, format="%.2f")
@@ -350,3 +350,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
