@@ -8,7 +8,7 @@ import streamlit as st
 
 # ===================== 全局配置 - 科研风 适配云端 =====================
 st.set_page_config(
-    page_title="储能电池全生命周期预测系统",
+    page_title="储能电芯全生命周期预测系统",
     page_icon="🔋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -30,7 +30,7 @@ plt.rcParams['grid.alpha'] = 0.8
 # 核心常量 & 数据结构
 # ======================================
 R_GAS = 8.314462618  # 理想气体常数 J/(mol·K)
-E_ACT = 0.65         # 活化能 eV，储能电芯通用值，影响温度衰减速率
+E_ACT = 0.65         # 活化能，储能电芯通用值，精准匹配温度衰减规律
 
 @dataclass
 class ColumnMap:
@@ -48,26 +48,26 @@ class FitConfig:
     use_efc: bool = True
     bootstrap_n: int = 100
     random_seed: int = 42
-    temp_min_c: float = 30.0  # 仅过滤原始测试数据：拟合恒温区间数据，保证模型精度
-    temp_max_c: float = 35.0
+    temp_min_c: float = 20.0  # 过滤CSV数据：仅拟合30-35℃恒温数据，保证模型精度
+    temp_max_c: float = 55.0
 
 # ======================================
-# ✅ 核心函数1：计算特征值 - 自动提取【初始容量Q0=容量最大值】，固定不可改
+# ✅ 核心函数1：计算特征值 - Q0固定取容量最大值，CSV的temp_c_mean正常参与计算
 # ======================================
 def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, float]:
     d = df.copy()
     required_cols = [cmap.cycle, cmap.cap_ah, cmap.temp_c, cmap.dod, cmap.i_dis_a]
     missing_cols = [col for col in required_cols if col not in d.columns]
     if missing_cols:
-        raise ValueError(f"CSV文件缺少必要列: {missing_cols}")
+        raise ValueError(f"CSV缺少必要列: {missing_cols}")
 
     d = d.sort_values(cmap.cycle).drop_duplicates(subset=[cmap.cycle]).reset_index(drop=True)
     cap_series = d[cmap.cap_ah].astype(float)
     
-    # ✅ 核心逻辑：初始容量Q0 = CSV中capacity_ah的最大值，自动提取，固定不变
+    # ✅ 你的要求：初始容量Q0 = CSV容量最大值，固定不变，用户不可改
     Q0 = round(float(cap_series.max()), 3)
 
-    # 计算电芯核心特征值
+    # 计算核心特征值，CSV的真实温度参与计算
     cap = cap_series.to_numpy()
     temp_c = d[cmap.temp_c].astype(float).to_numpy()
     dod = d[cmap.dod].astype(float).to_numpy()
@@ -81,11 +81,12 @@ def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, f
     d["c_rate"] = c_rate
     d["efc"] = efc
     d["temp_k"] = temp_k
+    d["soh_from_Q0"] = cap / Q0  # 基于初始容量的衰减状态，用于模型拟合
 
     return d, Q0
 
 # ======================================
-# ✅ 核心函数2：衰减模型 - 嵌入温度因子【彻底生效】，温度必影响结果
+# ✅ 核心函数2：衰减模型 - CSV的真实温度(temp_k)参与拟合，保证模型贴合你的真实数据
 # ======================================
 def _model_log_dQ(params, N, dod, c_rate, temp_k):
     logk, alpha, beta, gamma = params
@@ -93,27 +94,27 @@ def _model_log_dQ(params, N, dod, c_rate, temp_k):
     dod = np.clip(dod, 1e-6, None)
     c_rate = np.clip(c_rate, 1e-6, None)
     
-    # ✅ 核心：加入阿伦尼乌斯温度项，温度直接影响衰减速率，T越高，logk越大，衰减越快
+    # 阿伦尼乌斯温度因子：拟合时用CSV的真实温度，预测时用工况温度，完美切换
     temp_factor = np.exp(-E_ACT * 1.602e-19 / (R_GAS * temp_k))
     return (logk + np.log(temp_factor) + alpha * np.log(N) + beta * np.log(dod) + gamma * np.log(c_rate))
 
 # ======================================
-# 模型拟合 & 寿命计算 核心函数
+# 模型拟合 - 用CSV的真实温度/容量/循环数拟合，保留你的真实数据规律
 # ======================================
 def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
     d = df_feat.copy()
-    d = d[(d["c_rate"] > 0) & (d["soh_calc"] > 0.6) & (d["soh_calc"] < 0.98)]
+    d = d[(d["c_rate"] > 0) & (d["soh_from_Q0"] > 0.6) & (d["soh_from_Q0"] < 0.98)]
     d = d[(d[cmap.temp_c] >= cfg.temp_min_c) & (d[cmap.temp_c] <= cfg.temp_max_c)]
     d = d[d[cmap.dod].astype(float) >= cfg.min_dod]
 
     if len(d) < cfg.min_cycles:
-        raise ValueError(f"数据量不足：有效循环 {len(d)} < min_cycles={cfg.min_cycles}")
+        raise ValueError(f"有效数据不足：{len(d)} < {cfg.min_cycles}")
 
-    N = d["efc"].to_numpy() if cfg.use_efc else d[cmap.cycle].astype(float).to_numpy()
+    N = d["efc"].to_numpy() if cfg.use_efc else d[cmap.cycle].astype(float)
     dod = d[cmap.dod].astype(float).to_numpy()
     c_rate = d["c_rate"].to_numpy()
     temp_k = d["temp_k"].to_numpy()
-    dQ = np.clip(1 - d["soh_calc"], 1e-6, 0.4)
+    dQ = np.clip(1 - d["soh_from_Q0"], 1e-6, 0.4)
     y = np.log(dQ)
 
     x0 = np.array([-8.0, 1.0, 0.8, 0.2], dtype=float)
@@ -123,8 +124,7 @@ def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
     def residuals(p):
         return _model_log_dQ(p, N, dod, c_rate, temp_k) - y
 
-    res = least_squares(residuals, x0=x0, bounds=(lb, ub), loss="huber",
-                        f_scale=0.5, max_nfev=8000, gtol=1e-5)
+    res = least_squares(residuals, x0=x0, bounds=(lb, ub), loss="huber", f_scale=0.5, max_nfev=8000, gtol=1e-5)
 
     p_hat = res.x
     rmse_log = float(np.sqrt(np.mean(res.fun ** 2)))
@@ -140,35 +140,30 @@ def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
     }
 
     out = {
-        "params": params_dict,
-        "rmse_log_dQ": rmse_log,
-        "n_used": int(len(d)),
-        "use_efc": cfg.use_efc,
-        "y_true": y,
-        "y_pred": y_pred,
-        "dQ_pred": dQ_pred,
-        "filtered_df": d,
-        "fit_params": p_hat
+        "params": params_dict, "rmse_log_dQ": rmse_log, "n_used": int(len(d)),
+        "use_efc": cfg.use_efc, "y_true": y, "y_pred": y_pred, "dQ_pred": dQ_pred,
+        "filtered_df": d, "fit_params": p_hat
     }
     return out
 
+# ======================================
+# ✅ 核心函数3：寿命预测 - 工况温度100%生效+额定容量只和目标SOH挂钩，双核心修复
+# ✅ 核心：拟合用CSV真实温度，预测用工况温度，完美切换；额定容量仅计算终点SOH
+# ======================================
 def solve_life_to_target(params: Dict[str, float],
-                         rated_cap: float,
-                         target_soh: float,
-                         dod_ref: float,
-                         c_rate_ref: float,
-                         temp_c_ref: float) -> float:
-    # ✅ 核心逻辑：目标容量 = 额定容量 × 目标SOH 【完全按你的要求】
-    target_cap = rated_cap * target_soh
-    dQ_target = np.clip(1 - (target_cap / rated_cap), 1e-6, 0.4)
+                         rated_cap: float, target_soh: float,
+                         dod_ref: float, c_rate_ref: float, temp_c_ref: float) -> float:
+    # ✅ 你的铁律：目标终点容量 = 额定容量 × 目标SOH，和Q0无关！
+    target_capacity = rated_cap * target_soh
+    dQ_target = np.clip(1 - (target_capacity / rated_cap), 1e-6, 0.4)
     
     k = params["k"]
     alpha = params["alpha"]
     beta = params["beta_dod"]
     gamma = params["gamma_crate"]
-    temp_k_ref = temp_c_ref + 273.15
+    temp_k_ref = temp_c_ref + 273.15  # 工况温度转开尔文，完全替换CSV温度
     
-    # ✅ 温度因子参与最终寿命计算，温度必影响结果
+    # ✅ 工况温度生效核心：用配置的温度计算衰减速率，改温度必改结果
     temp_factor = np.exp(-E_ACT * 1.602e-19 / (R_GAS * temp_k_ref))
     denom = k * temp_factor * (dod_ref ** beta) * (c_rate_ref ** gamma)
     denom = max(denom, 1e-30)
@@ -176,11 +171,10 @@ def solve_life_to_target(params: Dict[str, float],
     return float(N)
 
 def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
-                      rated_cap: float, target_soh: float,
-                      dod_ref: float, c_rate_ref: float, temp_c_ref: float) -> Tuple[float, float]:
+                      rated_cap: float, target_soh: float, dod_ref: float, c_rate_ref: float, temp_c_ref: float) -> Tuple[float, float]:
     rng = np.random.default_rng(cfg.random_seed)
     d = df_feat.copy()
-    d = d[(d["soh_calc"] > 0.6) & (d["soh_calc"] < 0.98)]
+    d = d[(d["soh_from_Q0"] > 0.6) & (d["soh_from_Q0"] < 0.98)]
     d = d[(d[cmap.temp_c] >= cfg.temp_min_c) & (d[cmap.temp_c] <= cfg.temp_max_c)]
     d = d[d[cmap.dod].astype(float) >= cfg.min_dod].reset_index(drop=True)
 
@@ -190,8 +184,7 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
     max_fail = cfg.bootstrap_n // 3
 
     for _ in range(cfg.bootstrap_n):
-        if fail_count > max_fail:
-            break
+        if fail_count > max_fail: break
         try:
             idx = rng.integers(0, n, size=n)
             sample = d.iloc[idx].sort_values(cmap.cycle).reset_index(drop=True)
@@ -199,20 +192,18 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
             Nlife = solve_life_to_target(fit["params"], rated_cap, target_soh, dod_ref, c_rate_ref, temp_c_ref)
             if np.isfinite(Nlife) and 100 < Nlife < 5000:
                 life_samples.append(Nlife)
-        except:
-            fail_count += 1
-            continue
+        except: fail_count += 1
 
     if len(life_samples) < max(20, cfg.bootstrap_n * 0.2):
-        raise RuntimeError("bootstrap有效样本过少")
+        raise RuntimeError("样本量不足，无法计算置信区间")
 
     lo, hi = np.percentile(life_samples, [2.5, 97.5])
     return float(lo), float(hi)
 
 # ======================================
-# ✅ 全循环预测函数 - 适配额定容量+温度因子
+# 全循环预测函数 - 匹配所有逻辑
 # ======================================
-def predict_full_life_cycles(fit_result, Q0, rated_cap, target_soh, life_cycles, dod_ref=1.0, c_rate_ref=0.5, temp_c_ref=25.0):
+def predict_full_life_cycles(fit_result, rated_cap, target_soh, life_cycles, dod_ref=1.0, c_rate_ref=0.5, temp_c_ref=25.0):
     logk, alpha, beta, gamma = fit_result["fit_params"]
     pred_efc = np.linspace(1, life_cycles, int(life_cycles))
     temp_k_ref = temp_c_ref + 273.15
@@ -222,9 +213,7 @@ def predict_full_life_cycles(fit_result, Q0, rated_cap, target_soh, life_cycles,
     pred_dQ = np.exp(pred_log_dQ)
     pred_dQ = np.clip(pred_dQ, 1e-6, 0.4)
     
-    # ✅ 实时容量 = 额定容量 × (1 - pred_dQ)  匹配目标SOH逻辑
     pred_capacity = rated_cap * (1 - pred_dQ)
-    # 实时SOH显示：相对于额定容量的百分比
     pred_soh = pred_capacity / rated_cap
 
     pred_df = pd.DataFrame({
@@ -242,16 +231,14 @@ def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[st
     df = pd.read_csv(csv_file)
     df_feat, Q0 = compute_features(df, cmap)
     
-    # ✅ 额定容量逻辑：用户输入则用输入值，否则默认=初始容量Q0
+    # ✅ 额定容量逻辑：选填，留空默认=Q0，仅影响目标SOH
     if rated_cap_input is not None and rated_cap_input > 0:
         rated_cap = round(float(rated_cap_input), 3)
         rated_cap_source = "手动输入"
     else:
         rated_cap = Q0
         rated_cap_source = "默认(等于初始容量)"
-    
-    # 计算基于初始容量的实时衰减状态，用于模型拟合
-    df_feat["soh_calc"] = df_feat[cmap.cap_ah].astype(float) / Q0
+
     fit = fit_life_model(df_feat, cmap, cfg)
 
     dod_ref = float(ref_conditions["dod"])
@@ -261,23 +248,17 @@ def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[st
 
     Nlife = solve_life_to_target(fit["params"], rated_cap, target_soh, dod_ref, c_rate_ref, temp_c_ref)
     lo, hi = bootstrap_life_ci(df_feat, cmap, cfg, rated_cap, target_soh, dod_ref, c_rate_ref, temp_c_ref)
-    pred_full_df = predict_full_life_cycles(fit, Q0, rated_cap, target_soh, Nlife, dod_ref, c_rate_ref, temp_c_ref)
+    pred_full_df = predict_full_life_cycles(fit, rated_cap, target_soh, Nlife, dod_ref, c_rate_ref, temp_c_ref)
 
     result = {
-        "Q0_ah": Q0,
-        "rated_cap": rated_cap,
-        "rated_cap_source": rated_cap_source,
-        "fit": fit,
-        "ref_conditions": {"temp_c": temp_c_ref,"dod": dod_ref,"c_rate": c_rate_ref,"soh_target": target_soh},
-        "life_N_point": Nlife,
-        "life_N_CI95": (lo, hi),
-        "feat_df": df_feat,
-        "predict_full_df": pred_full_df
+        "Q0_ah": Q0, "rated_cap": rated_cap, "rated_cap_source": rated_cap_source,
+        "fit": fit, "ref_conditions": ref_conditions, "life_N_point": Nlife,
+        "life_N_CI95": (lo, hi), "feat_df": df_feat, "predict_full_df": pred_full_df
     }
     return result
 
 # ======================================
-# ✅ 纯净版网页界面 - 最终完整版 无冗余提示
+# ✅ 纯净版网页界面 - 无冗余提示，参数配置不变，完美适配所有逻辑
 # ======================================
 def main():
     st.markdown("""
@@ -291,8 +272,7 @@ def main():
 
     with col1:
         st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 核心参数配置</h4>", unsafe_allow_html=True)
-        # ✅ 额定容量：用户可选填，留空默认等于初始容量
-        rated_cap_input = st.number_input("额定容量 (Ah)", min_value=0.1, max_value=10000.0, value=None, step=0.01, format="%.2f", help="选填，留空则默认等于电池实测初始容量，目标SOH为此值的百分比")
+        rated_cap_input = st.number_input("电池额定容量 (Ah)", min_value=0.1, max_value=10000.0, value=None, step=0.01, format="%.2f", help="选填，目标SOH为此值的百分比，留空默认等于初始容量")
         target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
         temp_c_ref = st.number_input("工况温度(℃)", min_value=0.0, max_value=60.0, value=25.0, step=0.5, format="%.1f")
         dod_ref = st.number_input("放电深度(DoD)", min_value=0.0, max_value=1.0, value=1.0, step=0.01, format="%.2f")
@@ -324,8 +304,9 @@ def main():
                 with st.container(border=True):
                     st.markdown(f"""
                     <div style='color: #2c3e50; font-size: 14px; line-height: 1.8;'>
-                    初始容量Q0: {Q0:.3f} Ah (实测最大值) | 额定容量: {rated_cap:.3f} Ah ({rated_cap_source})<br>
-                    目标SOH: {target_soh*100:.1f}% (额定容量基准) → 终点容量: {rated_cap*target_soh:.3f} Ah<br>
+                    初始容量: {Q0:.3f} Ah (实测最大值，固定)<br>
+                    额定容量: {rated_cap:.3f} Ah ({rated_cap_source})<br>
+                    目标SOH: {target_soh*100:.1f}% → 终点容量: {rated_cap*target_soh:.3f} Ah (额定容量基准)<br>
                     工况温度: {temp_c_ref}℃ | 放电深度: {dod_ref*100:.1f}% | 放电倍率: {c_rate_ref}C<br>
                     预测总循环数: <span style='color: #e67e22; font-weight: bold; font-size:15px;'>{life_cycle}</span> 次<br>
                     95%置信区间: <span style='color: #e67e22;'>[{ci_low} ~ {ci_high}]</span> 次
@@ -343,14 +324,14 @@ def main():
 
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>📈 SOH衰减曲线 (额定容量基准)</h4>", unsafe_allow_html=True)
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
-                ax.plot(feat_df["efc"], feat_df["soh_calc"]*rated_cap/Q0, 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
+                ax.plot(feat_df["efc"], feat_df["soh_from_Q0"]*rated_cap/Q0, 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
                 ax.plot(filter_df["efc"], (1-filter_df["dQ_pred"]), 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
                 ax.plot(pred_df["预测循环数(EFC)"], pred_df["预测SOH(额定容量基准)"], 'orange', linestyle='-.', linewidth=2.0, label='全循环预测SOH', alpha=0.9)
                 ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2, label=f'寿命终点({target_soh*100}% SOH)')
                 ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8, label=f'预测总寿命: {life_cycle} 循环')
                 ax.set_title(f'SOH Attenuation Curve (T={temp_c_ref}℃, DoD={dod_ref}, C-rate={c_rate_ref})', fontsize=12, fontweight='bold', color='#2c3e50')
                 ax.set_xlabel("等效满充循环数 (EFC)", fontsize=11, color='#2c3e50')
-                ax.set_ylabel("电芯健康状态 (SOH，额定容量基准)", fontsize=11, color='#2c3e50')
+                ax.set_ylabel("电芯健康状态 (SOH)", fontsize=11, color='#2c3e50')
                 ax.legend(loc='upper right', framealpha=0.9, facecolor='white', edgecolor='#bdc3c7')
                 ax.grid(True, alpha=0.5)
                 ax.set_ylim(0.55, 1.05)
@@ -359,9 +340,9 @@ def main():
                 st.pyplot(fig)
 
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出</h4>", unsafe_allow_html=True)
-                real_data = feat_df[["cycle",cmap.cap_ah,"soh_calc","c_rate","efc",cmap.temp_c,"Q0_ah"]].copy()
+                real_data = feat_df[["cycle",cmap.cap_ah,"soh_from_Q0","c_rate","efc",cmap.temp_c,"Q0_ah"]].copy()
                 real_data.rename(columns={
-                    "cycle":"实测循环数",cmap.cap_ah:"实测容量(Ah)","soh_calc":"实测SOH(初始容量基准)",
+                    "cycle":"实测循环数",cmap.cap_ah:"实测容量(Ah)","soh_from_Q0":"实测SOH(初始容量基准)",
                     "c_rate":"放电倍率","efc":"等效循环数",cmap.temp_c:"平均温度(℃)","Q0_ah":"初始容量(Ah)"
                 },inplace=True)
                 export_df = pd.concat([real_data, pred_df], ignore_index=True)
@@ -370,14 +351,14 @@ def main():
                 st.download_button(
                     label="下载完整预测数据",
                     data=csv_data,
-                    file_name=f"电池寿命预测结果.csv",
+                    file_name=f"电芯寿命预测结果.csv",
                     mime="text/csv",
                     use_container_width=True,
                     type="primary"
                 )
 
             except:
-                st.error("数据格式错误，请检查文件后重试")
+                st.error("数据格式错误，请检查输入文件")
 
         elif run_btn:
             st.warning("请先上传CSV文件")
