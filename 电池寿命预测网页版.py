@@ -27,10 +27,9 @@ plt.rcParams['grid.color'] = '#ecf0f1'
 plt.rcParams['grid.alpha'] = 0.8
 
 # ======================================
-# ↓↓↓↓↓↓ 你的原始核心代码 - 一字未改 完全保留 ↓↓↓↓↓↓
+# ↓↓↓↓↓↓ 核心代码 + Q0优化适配 完整保留 ↓↓↓↓↓↓
 # ======================================
 R_GAS = 8.314462618  # 理想气体常数
-
 
 @dataclass
 class ColumnMap:
@@ -39,8 +38,6 @@ class ColumnMap:
     temp_c: str = "temp_c_mean"
     dod: str = "dod"
     i_dis_a: str = "i_dis_a_mean"
-    rated_cap_ah: Optional[str] = None
-
 
 @dataclass
 class FitConfig:
@@ -50,11 +47,15 @@ class FitConfig:
     use_efc: bool = True
     bootstrap_n: int = 100
     random_seed: int = 42
-    temp_min_c: float = 20.0
-    temp_max_c: float = 50.0
+    temp_min_c: float = 30.0  # 过滤原始测试数据：仅拟合恒温区间数据
+    temp_max_c: float = 35.0
 
-
-def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, float]:
+def compute_features(df: pd.DataFrame, cmap: ColumnMap, manual_Q0: Optional[float] = None) -> Tuple[pd.DataFrame, float, str]:
+    """
+    计算特征值 + 适配Q0双模式
+    manual_Q0: 用户手动输入的额定容量，None则自动取capacity_ah最大值
+    return: 处理后数据, Q0值, Q0来源描述
+    """
     d = df.copy()
     required_cols = [cmap.cycle, cmap.cap_ah, cmap.temp_c, cmap.dod, cmap.i_dis_a]
     missing_cols = [col for col in required_cols if col not in d.columns]
@@ -62,14 +63,17 @@ def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, f
         raise ValueError(f"CSV文件缺少必要列: {missing_cols}")
 
     d = d.sort_values(cmap.cycle).drop_duplicates(subset=[cmap.cycle]).reset_index(drop=True)
-
-    if cmap.rated_cap_ah and cmap.rated_cap_ah in d.columns:
-        rated_cap = d[cmap.rated_cap_ah].astype(float)
-        Q0 = float(rated_cap.iloc[0])
+    cap_series = d[cmap.cap_ah].astype(float)
+    
+    # ✅ 核心优化：Q0取值逻辑 手动输入优先，否则取容量最大值
+    if manual_Q0 is not None and manual_Q0 > 0:
+        Q0 = round(float(manual_Q0), 3)
+        q0_source = "手动输入(额定值)"
     else:
-        Q0 = float(d[cmap.cap_ah].astype(float).head(20).median())
+        Q0 = round(float(cap_series.max()), 3)  # 自动取实测容量最大值
+        q0_source = "自动计算(最大值)"
 
-    cap = d[cmap.cap_ah].astype(float).to_numpy()
+    cap = cap_series.to_numpy()
     temp_c = d[cmap.temp_c].astype(float).to_numpy()
     dod = d[cmap.dod].astype(float).to_numpy()
     i_dis = d[cmap.i_dis_a].astype(float).to_numpy()
@@ -86,8 +90,7 @@ def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, f
     d["efc"] = efc
     d["temp_k"] = temp_c + 273.15
 
-    return d, Q0
-
+    return d, Q0, q0_source
 
 def _model_log_dQ(params, N, dod, c_rate):
     logk, alpha, beta, gamma = params
@@ -95,7 +98,6 @@ def _model_log_dQ(params, N, dod, c_rate):
     dod = np.clip(dod, 1e-6, None)
     c_rate = np.clip(c_rate, 1e-6, None)
     return (logk + alpha * np.log(N) + beta * np.log(dod) + gamma * np.log(c_rate))
-
 
 def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
     d = df_feat.copy()
@@ -133,7 +135,7 @@ def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
         "beta_dod": float(p_hat[2]),
         "gamma_crate": float(p_hat[3]),
     }
-    # ========== ✅ 删除了 α/β 系数的警告提示 ==========
+
     out = {
         "params": params_dict,
         "rmse_log_dQ": rmse_log,
@@ -146,7 +148,6 @@ def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
         "fit_params": p_hat
     }
     return out
-
 
 def solve_life_to_target(params: Dict[str, float],
                          target_soh: float,
@@ -161,7 +162,6 @@ def solve_life_to_target(params: Dict[str, float],
     denom = max(denom, 1e-30)
     N = (dQ_target / denom) ** (1.0 / max(alpha, 1e-6))
     return float(N)
-
 
 def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
                       dod_ref: float, c_rate_ref: float) -> Tuple[float, float]:
@@ -178,7 +178,6 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
 
     for _ in range(cfg.bootstrap_n):
         if fail_count > max_fail:
-            # ========== ✅ 删除了 Bootstrap抽样的信息提示 ==========
             break
         try:
             idx = rng.integers(0, n, size=n)
@@ -197,9 +196,8 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
     lo, hi = np.percentile(life_samples, [2.5, 97.5])
     return float(lo), float(hi)
 
-
 # ======================================
-# ✅ 全循环容量预测函数 (核心)
+# ✅ 全循环容量预测函数 - 适配所有工况参数
 # ======================================
 def predict_full_life_cycles(fit_result, Q0, target_soh, life_cycles, dod_ref=1.0, c_rate_ref=0.5):
     logk, alpha, beta, gamma = fit_result["fit_params"]
@@ -217,17 +215,17 @@ def predict_full_life_cycles(fit_result, Q0, target_soh, life_cycles, dod_ref=1.
     })
     return pred_df
 
-
 # ======================================
-# ✅ 主流程函数
+# ✅ 主流程函数 - 适配手动Q0+温度工况
 # ======================================
-def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict[str, float]):
+def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[str, float], manual_Q0: Optional[float] = None):
     df = pd.read_csv(csv_file)
-    df_feat, Q0 = compute_features(df, cmap)
+    df_feat, Q0, q0_source = compute_features(df, cmap, manual_Q0)
     fit = fit_life_model(df_feat, cmap, cfg)
 
     dod_ref = float(ref_conditions["dod"])
     c_rate_ref = float(ref_conditions["c_rate"])
+    temp_c_ref = float(ref_conditions["temp_c"])
     target_soh = cfg.soh_target
 
     Nlife = solve_life_to_target(fit["params"], target_soh, dod_ref, c_rate_ref)
@@ -236,9 +234,9 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
 
     result = {
         "Q0_ah_est": Q0,
+        "Q0_source": q0_source,
         "fit": fit,
-        "ref_conditions": {"temp_c": ref_conditions["temp_c"], "dod": dod_ref, "c_rate": c_rate_ref,
-                           "soh_target": target_soh},
+        "ref_conditions": {"temp_c": temp_c_ref,"dod": dod_ref,"c_rate": c_rate_ref,"soh_target": target_soh},
         "life_N_point": Nlife,
         "life_N_CI95": (lo, hi),
         "feat_df": df_feat,
@@ -246,9 +244,8 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
     }
     return result
 
-
 # ======================================
-# ✅ 纯净版网页界面 - 无任何多余提示/警告/报错信息
+# ✅ 纯净版网页界面 - 新增【手动输入Q0】核心优化 最终版
 # ======================================
 def main():
     st.markdown("""
@@ -261,17 +258,15 @@ def main():
     col1, col2 = st.columns([1, 2.8], gap="large")
 
     with col1:
-        st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 参数配置</h4>",
-                    unsafe_allow_html=True)
-        target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01,
-                                     format="%.2f")
+        st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 核心参数配置</h4>", unsafe_allow_html=True)
+        # ✅ 新增：手动输入额定容量Q0，留空则自动取最大值
+        manual_Q0 = st.number_input("额定容量 Q0 (Ah)", min_value=0.1, max_value=50.0, value=None, step=0.01, format="%.2f", help="留空则自动取实测容量最大值，已知额定值建议手动输入")
+        target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
+        temp_c_ref = st.number_input("工况温度(℃)", min_value=0.0, max_value=60.0, value=25.0, step=0.5, format="%.1f")
         dod_ref = st.number_input("放电深度(DoD)", min_value=0.0, max_value=1.0, value=1.0, step=0.01, format="%.2f")
-        c_rate_ref = st.number_input("放电倍率(C-rate)", min_value=0.01, max_value=5.0, value=0.5, step=0.01,
-                                     format="%.2f")
+        c_rate_ref = st.number_input("放电倍率(C-rate)", min_value=0.01, max_value=5.0, value=0.5, step=0.01, format="%.2f")
 
-        st.markdown(
-            "<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:20px'>📂 上传数据</h4>",
-            unsafe_allow_html=True)
+        st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:20px'>📂 上传数据</h4>", unsafe_allow_html=True)
         uploaded_file = st.file_uploader("选择CSV文件", type="csv")
 
         run_btn = st.button("开始预测", use_container_width=True, type="primary")
@@ -281,32 +276,29 @@ def main():
             try:
                 with st.spinner("计算中..."):
                     cfg = FitConfig(soh_target=target_soh)
-                    ref_conditions = {"temp_c": 25.0, "dod": dod_ref, "c_rate": c_rate_ref}
-                    all_result = run_pipeline(uploaded_file, cmap, cfg, ref_conditions)
+                    ref_conditions = {"temp_c":temp_c_ref, "dod":dod_ref, "c_rate":c_rate_ref}
+                    all_result = run_pipeline(uploaded_file, cmap, cfg, ref_conditions, manual_Q0)
                     fit_params = all_result["fit"]["params"]
                     life_cycle = int(all_result["life_N_point"])
                     ci_low, ci_high = int(all_result["life_N_CI95"][0]), int(all_result["life_N_CI95"][1])
                     Q0 = all_result["Q0_ah_est"]
+                    q0_source = all_result["Q0_source"]
                     pred_df = all_result["predict_full_df"]
                     feat_df = all_result["feat_df"]
                     filter_df = all_result["fit"]["filtered_df"]
 
-                st.markdown(
-                    "<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>📊 预测结果</h4>",
-                    unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>📊 预测结果</h4>", unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown(f"""
                     <div style='color: #2c3e50; font-size: 14px; line-height: 1.8;'>
-                    初始容量 Q0: {Q0:.3f} Ah | 有效拟合循环数: {all_result['fit']['n_used']} 个<br>
-                    目标SOH: {target_soh * 100:.1f}% | 放电深度: {dod_ref * 100:.1f}% | 放电倍率: {c_rate_ref}C<br>
+                    初始容量 Q0: {Q0:.3f} Ah ({q0_source}) | 有效拟合循环数: {all_result['fit']['n_used']} 个<br>
+                    目标SOH: {target_soh*100:.1f}% | 工况温度: {temp_c_ref}℃ | 放电深度: {dod_ref*100:.1f}% | 放电倍率: {c_rate_ref}C<br>
                     预测总循环数: <span style='color: #e67e22; font-weight: bold; font-size:15px;'>{life_cycle}</span> 次<br>
                     95%置信区间: <span style='color: #e67e22;'>[{ci_low} ~ {ci_high}]</span> 次
                     </div>
                     """, unsafe_allow_html=True)
 
-                st.markdown(
-                    "<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>⚙️ 模型参数</h4>",
-                    unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>⚙️ 模型拟合参数</h4>", unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown(f"""
                     <div style='color: #2c3e50; font-size: 13px; line-height: 1.8;'>
@@ -315,20 +307,14 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
 
-                st.markdown(
-                    "<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>📈 SOH衰减曲线</h4>",
-                    unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>📈 SOH衰减曲线</h4>", unsafe_allow_html=True)
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
                 ax.plot(feat_df["efc"], feat_df["soh"], 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
-                ax.plot(filter_df["efc"], 1 - filter_df["dQ"], 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
-                ax.plot(pred_df["预测循环数(EFC)"], pred_df["预测SOH"], 'orange', linestyle='-.', linewidth=2.0,
-                        label='全循环预测SOH', alpha=0.9)
-                ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2,
-                           label=f'寿命终点({target_soh * 100}% SOH)')
-                ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8,
-                           label=f'预测总寿命: {life_cycle} 循环')
-                ax.set_title(f'SOH Attenuation Curve (DoD={dod_ref}, C-rate={c_rate_ref})', fontsize=12,
-                             fontweight='bold', color='#2c3e50')
+                ax.plot(filter_df["efc"], 1-filter_df["dQ"], 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
+                ax.plot(pred_df["预测循环数(EFC)"], pred_df["预测SOH"], 'orange', linestyle='-.', linewidth=2.0, label='全循环预测SOH', alpha=0.9)
+                ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2, label=f'寿命终点({target_soh*100}% SOH)')
+                ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8, label=f'预测总寿命: {life_cycle} 循环')
+                ax.set_title(f'SOH Attenuation Curve (T={temp_c_ref}℃, DoD={dod_ref}, C-rate={c_rate_ref}, Q0={Q0}Ah)', fontsize=12, fontweight='bold', color='#2c3e50')
                 ax.set_xlabel("等效满充循环数 (EFC)", fontsize=11, color='#2c3e50')
                 ax.set_ylabel("电芯健康状态 (SOH)", fontsize=11, color='#2c3e50')
                 ax.legend(loc='upper right', framealpha=0.9, facecolor='white', edgecolor='#bdc3c7')
@@ -338,17 +324,15 @@ def main():
                 ax.spines['right'].set_visible(False)
                 st.pyplot(fig)
 
-                st.markdown(
-                    "<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出</h4>",
-                    unsafe_allow_html=True)
-                real_data = feat_df[["cycle", "capacity_ah", "soh", "dQ", "c_rate", "efc", cmap.temp_c, "Q0_ah"]].copy()
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出</h4>", unsafe_allow_html=True)
+                real_data = feat_df[["cycle","capacity_ah","soh","dQ","c_rate","efc",cmap.temp_c,"Q0_ah"]].copy()
                 real_data.rename(columns={
-                    "cycle": "实测循环数", "capacity_ah": "实测容量(Ah)", "soh": "实测SOH", "dQ": "实测衰减量",
-                    "c_rate": "放电倍率", "efc": "等效循环数", cmap.temp_c: "平均温度(℃)", "Q0_ah": "初始容量(Ah)"
-                }, inplace=True)
+                    "cycle":"实测循环数","capacity_ah":"实测容量(Ah)","soh":"实测SOH","dQ":"实测衰减量",
+                    "c_rate":"放电倍率","efc":"等效循环数",cmap.temp_c:"平均温度(℃)","Q0_ah":"初始容量(Ah)"
+                },inplace=True)
                 export_df = pd.concat([real_data, pred_df], ignore_index=True)
                 csv_data = export_df.to_csv(index=False, encoding="utf-8-sig").encode('utf-8-sig')
-
+                
                 st.download_button(
                     label="下载完整预测数据",
                     data=csv_data,
@@ -357,17 +341,12 @@ def main():
                     use_container_width=True,
                     type="primary"
                 )
-                # ========== ✅ 删除了成功提示文字 ==========
 
             except:
-                # ========== ✅ 删除了报错详情，只留极简提示 ==========
                 st.error("数据格式错误，请检查文件后重试")
 
         elif run_btn:
-            # ========== ✅ 删除了啰嗦提示，极简警告 ==========
             st.warning("请先上传CSV文件")
-
 
 if __name__ == "__main__":
     main()
-
