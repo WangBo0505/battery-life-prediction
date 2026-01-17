@@ -50,8 +50,8 @@ class FitConfig:
     use_efc: bool = True
     bootstrap_n: int = 100
     random_seed: int = 42
-    temp_min_c: float = 30.0
-    temp_max_c: float = 35.0
+    temp_min_c: float = 20.0
+    temp_max_c: float = 50.0
 
 
 def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, float]:
@@ -252,7 +252,7 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
 # ======================================
 def main():
     st.markdown("""
-        <h1 style='text-align: center; color: #2980b9; font-weight: bold;'>🔋 储能电芯全生命周期高精度预测系统</h1>
+        <h1 style='text-align: center; color: #2980b9; font-weight: bold;'>🔋 储能电池全生命周期高精度预测系统</h1>
         <h3 style='text-align: center; color: #7f8c8d;'>Electrochemical Attenuation Model | Full Cycle Capacity Prediction</h3>
         <hr style='border: 1px solid #ecf0f1;'>
     """, unsafe_allow_html=True)
@@ -370,3 +370,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
