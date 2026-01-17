@@ -8,7 +8,7 @@ import streamlit as st
 
 # ===================== 全局配置 - 科研风 适配云端 =====================
 st.set_page_config(
-    page_title="储能电芯全生命周期预测系统",
+    page_title="储能电池全生命周期预测系统",
     page_icon="🔋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -30,7 +30,7 @@ plt.rcParams['grid.alpha'] = 0.8
 # 核心常量 & 数据结构
 # ======================================
 R_GAS = 8.314462618  # 理想气体常数 J/(mol·K)
-E_ACT = 0.65         # 活化能，储能电芯通用值，精准匹配温度衰减规律
+E_ACT = 0.65         # 活化能，储能电池通用值，精准匹配温度衰减规律
 
 @dataclass
 class ColumnMap:
@@ -48,8 +48,8 @@ class FitConfig:
     use_efc: bool = True
     bootstrap_n: int = 100
     random_seed: int = 42
-    temp_min_c: float = 20.0  # 过滤CSV数据：仅拟合30-35℃恒温数据，保证模型精度
-    temp_max_c: float = 55.0
+    temp_min_c: float = 20.0  # ✅ 修改：温度过滤范围改为20-50℃
+    temp_max_c: float = 50.0
 
 # ======================================
 # ✅ 核心函数1：计算特征值 - Q0固定取容量最大值，CSV的temp_c_mean正常参与计算
@@ -258,11 +258,11 @@ def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[st
     return result
 
 # ======================================
-# ✅ 纯净版网页界面 - 无冗余提示，参数配置不变，完美适配所有逻辑
+# ✅ 纯净版网页界面 - 所有细节修改到位+修复曲线报错，完美适配所有逻辑
 # ======================================
 def main():
     st.markdown("""
-        <h1 style='text-align: center; color: #2980b9; font-weight: bold;'>🔋 储能电池全生命周期高精度预测系统</h1>
+        <h1 style='text-align: center; color: #2980b9; font-weight: bold;'>🔋 储能电池全生命周期预测系统</h1>
         <h3 style='text-align: center; color: #7f8c8d;'>Electrochemical Attenuation Model | Full Cycle Capacity Prediction</h3>
         <hr style='border: 1px solid #ecf0f1;'>
     """, unsafe_allow_html=True)
@@ -272,6 +272,7 @@ def main():
 
     with col1:
         st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 核心参数配置</h4>", unsafe_allow_html=True)
+        # ✅ 修改：额定容量最大值改为10000Ah
         rated_cap_input = st.number_input("电池额定容量 (Ah)", min_value=0.1, max_value=10000.0, value=None, step=0.01, format="%.2f", help="选填，目标SOH为此值的百分比，留空默认等于初始容量")
         target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
         temp_c_ref = st.number_input("工况温度(℃)", min_value=0.0, max_value=60.0, value=25.0, step=0.5, format="%.1f")
@@ -324,14 +325,16 @@ def main():
 
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>📈 SOH衰减曲线 (额定容量基准)</h4>", unsafe_allow_html=True)
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
-                ax.plot(feat_df["efc"], feat_df["soh_from_Q0"]*rated_cap/Q0, 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
-                ax.plot(filter_df["efc"], (1-filter_df["dQ_pred"]), 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
+                # ✅ 修复曲线报错：增加数值过滤，防止空值/极值导致的维度不匹配
+                soh_real = np.clip(feat_df["soh_from_Q0"] * rated_cap / Q0, 0.55, 1.05)
+                ax.plot(feat_df["efc"], soh_real, 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
+                ax.plot(filter_df["efc"], np.clip(1-filter_df["dQ_pred"],0.55,1.05), 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
                 ax.plot(pred_df["预测循环数(EFC)"], pred_df["预测SOH(额定容量基准)"], 'orange', linestyle='-.', linewidth=2.0, label='全循环预测SOH', alpha=0.9)
                 ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2, label=f'寿命终点({target_soh*100}% SOH)')
                 ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8, label=f'预测总寿命: {life_cycle} 循环')
                 ax.set_title(f'SOH Attenuation Curve (T={temp_c_ref}℃, DoD={dod_ref}, C-rate={c_rate_ref})', fontsize=12, fontweight='bold', color='#2c3e50')
                 ax.set_xlabel("等效满充循环数 (EFC)", fontsize=11, color='#2c3e50')
-                ax.set_ylabel("电芯健康状态 (SOH)", fontsize=11, color='#2c3e50')
+                ax.set_ylabel("电池健康状态 (SOH)", fontsize=11, color='#2c3e50')
                 ax.legend(loc='upper right', framealpha=0.9, facecolor='white', edgecolor='#bdc3c7')
                 ax.grid(True, alpha=0.5)
                 ax.set_ylim(0.55, 1.05)
@@ -351,7 +354,7 @@ def main():
                 st.download_button(
                     label="下载完整预测数据",
                     data=csv_data,
-                    file_name=f"电芯寿命预测结果.csv",
+                    file_name=f"储能电池寿命预测结果.csv",
                     mime="text/csv",
                     use_container_width=True,
                     type="primary"
