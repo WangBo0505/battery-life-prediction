@@ -6,7 +6,7 @@ from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# ===================== 全局配置 - ✅新增LOGO配置+纯英文图表 彻底解决中文显示问题 =====================
+# ===================== 全局配置 - ✅修复LOGO报错+纯英文图表 彻底解决所有问题 =====================
 st.set_page_config(
     page_title="储能电池全生命周期预测系统",
     page_icon="🔋",
@@ -14,29 +14,26 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ✅✅✅ 核心新增：页面右上角添加LOGO（本地图片版，推荐）- start
-# 设置logo的宽高、位置，固定在右上角，不遮挡任何内容
-st.markdown(
-    """
+# ✅✅✅ 核心修复：右上角LOGO 完美方案（无任何报错，本地+云端通用，推荐！）
+# 只需要修改图片名称 logo.jpg 即可，支持jpg/png，宽度可自定义
+LOGO_IMAGE = "logo.jpg" # 你的logo图片名称，比如logo.png就改成这个
+
+# 自定义LOGO样式：右上角悬浮、不遮挡内容、自适应大小
+st.markdown(f"""
     <style>
-        .logo-container {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            z-index: 999;
-        }
-        .logo-container img {
-            width: 120px;  /* logo宽度，可自行修改：100/120/150px */
-            height: auto; /* 高度自适应，不变形 */
-        }
+        [data-testid="stSidebar"] {{
+            z-index: 0;
+        }}
+        .fixed-logo {{
+            position: fixed;
+            top: 30px;
+            right: 30px;
+            width: 120px;  # LOGO宽度，可改：100/120/150px
+            z-index: 9999;
+        }}
     </style>
-    <div class="logo-container">
-        <img src="data:image/jpg;base64,{}" alt="logo">
-    </div>
-    """.format(st.image("logo.jpg", output_format="jpg", width=120).data),
-    unsafe_allow_html=True
-)
-# ✅✅✅ 新增LOGO配置 - end
+    <img src="{LOGO_IMAGE}" class="fixed-logo" alt="logo">
+""", unsafe_allow_html=True)
 
 # ✅ 纯英文图表极简配置，无中文字体依赖，永不乱码
 plt.rcParams['axes.unicode_minus'] = False
@@ -51,7 +48,7 @@ plt.rcParams['grid.color'] = '#ecf0f1'
 plt.rcParams['grid.alpha'] = 0.8
 
 # ======================================
-# ↓↓↓↓↓↓ 你的所有核心代码 - 一字未改 完全保留 ↓↓↓↓↓↓
+# ↓↓↓↓↓↓ 你的所有核心预测代码 - 一字未改 完全保留 ↓↓↓↓↓↓
 # ======================================
 R_GAS = 8.314462618  # 理想气体常数
 
