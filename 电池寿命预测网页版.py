@@ -6,7 +6,7 @@ from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# ===================== 全局配置 - 科研风 适配云端 - ✅【修复中文显示核心配置】=====================
+# ===================== 全局配置 - 科研风 适配云端 - 纯英文图表 无需中文字体 =====================
 st.set_page_config(
     page_title="储能电池全生命周期预测系统",
     page_icon="🔋",
@@ -14,8 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ✅✅✅ 核心修复：解决matplotlib绘图中文显示方块/乱码问题（本地+云端都生效）
-plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS']
+# ✅ 纯英文图表配置，彻底解决中文显示问题，极简稳定
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 plt.rcParams['figure.facecolor'] = 'white'
 plt.rcParams['axes.facecolor'] = 'white'
@@ -28,7 +27,7 @@ plt.rcParams['grid.color'] = '#ecf0f1'
 plt.rcParams['grid.alpha'] = 0.8
 
 # ======================================
-# ↓↓↓↓↓↓ 你的原始核心代码 - 一字未改 完全保留 ↓↓↓↓↓↓
+# ↓↓↓↓↓↓ 核心代码 - 新增额定容量+修改SOH计算逻辑 精准匹配需求 ↓↓↓↓↓↓
 # ======================================
 R_GAS = 8.314462618  # 理想气体常数
 
@@ -52,7 +51,8 @@ class FitConfig:
     temp_min_c: float = 20.0
     temp_max_c: float = 55.0
 
-def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, float]:
+def compute_features(df: pd.DataFrame, cmap: ColumnMap, rated_capacity: float) -> Tuple[pd.DataFrame, float]:
+    """✅ 核心修改：新增入参rated_capacity(用户输入)，SOH基于额定容量计算"""
     d = df.copy()
     required_cols = [cmap.cycle, cmap.cap_ah, cmap.temp_c, cmap.dod, cmap.i_dis_a]
     missing_cols = [col for col in required_cols if col not in d.columns]
@@ -61,6 +61,7 @@ def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, f
 
     d = d.sort_values(cmap.cycle).drop_duplicates(subset=[cmap.cycle]).reset_index(drop=True)
 
+    # ✅ 初始容量Q0计算逻辑 完全保留你的版本 不动
     if cmap.rated_cap_ah and cmap.rated_cap_ah in d.columns:
         rated_cap = d[cmap.rated_cap_ah].astype(float)
         Q0 = float(rated_cap.iloc[0])
@@ -72,12 +73,14 @@ def compute_features(df: pd.DataFrame, cmap: ColumnMap) -> Tuple[pd.DataFrame, f
     dod = d[cmap.dod].astype(float).to_numpy()
     i_dis = d[cmap.i_dis_a].astype(float).to_numpy()
 
-    soh = cap / Q0
+    # ✅ ✔️ 重中之重：SOH = 实测容量 / 用户输入的【额定容量】，不是初始容量Q0
+    soh = cap / rated_capacity
     dQ = np.clip(1.0 - soh, 1e-6, 0.4)
-    c_rate = np.clip(np.abs(i_dis) / max(Q0, 1e-6), 1e-6, None)
+    c_rate = np.clip(np.abs(i_dis) / max(Q0, 1e-6), 1e-6, None)  # c-rate还是用Q0计算，不影响
     efc = np.cumsum(np.clip(dod, 0.0, 1.0))
 
     d["Q0_ah"] = Q0
+    d["Rated_Cap_Ah"] = rated_capacity  # 新增：把额定容量存入数据
     d["soh"] = soh
     d["dQ"] = dQ
     d["c_rate"] = c_rate
@@ -190,30 +193,30 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
     return float(lo), float(hi)
 
 # ======================================
-# ✅ 全循环容量预测函数 (核心)
+# ✅ 全循环容量预测函数 - 适配额定容量
 # ======================================
-def predict_full_life_cycles(fit_result, Q0, target_soh, life_cycles, dod_ref=1.0, c_rate_ref=0.5):
+def predict_full_life_cycles(fit_result, rated_capacity, target_soh, life_cycles, dod_ref=1.0, c_rate_ref=0.5):
     logk, alpha, beta, gamma = fit_result["fit_params"]
     pred_efc = np.linspace(1, life_cycles, int(life_cycles))
     pred_log_dQ = logk + alpha * np.log(pred_efc) + beta * np.log(dod_ref) + gamma * np.log(c_rate_ref)
     pred_dQ = np.exp(pred_log_dQ)
     pred_dQ = np.clip(pred_dQ, 1e-6, 0.4)
     pred_soh = 1 - pred_dQ
-    pred_capacity = pred_soh * Q0
+    pred_capacity = pred_soh * rated_capacity  # ✅ 预测容量也是基于额定容量
     pred_df = pd.DataFrame({
-        "预测循环数(EFC)": pred_efc.astype(int),
-        "预测SOH": pred_soh,
-        "预测容量(Ah)": pred_capacity,
-        "容量衰减量": pred_dQ
+        "Pred_EFC": pred_efc.astype(int),
+        "Pred_SOH": pred_soh,
+        "Pred_Capacity(Ah)": pred_capacity,
+        "Capacity_Decay": pred_dQ
     })
     return pred_df
 
 # ======================================
-# ✅ 主流程函数
+# ✅ 主流程函数 - 新增额定容量入参
 # ======================================
-def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[str, float]):
+def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[str, float], rated_capacity: float):
     df = pd.read_csv(csv_file)
-    df_feat, Q0 = compute_features(df, cmap)
+    df_feat, Q0 = compute_features(df, cmap, rated_capacity)
     fit = fit_life_model(df_feat, cmap, cfg)
 
     dod_ref = float(ref_conditions["dod"])
@@ -222,10 +225,11 @@ def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[st
 
     Nlife = solve_life_to_target(fit["params"], target_soh, dod_ref, c_rate_ref)
     lo, hi = bootstrap_life_ci(df_feat, cmap, cfg, dod_ref, c_rate_ref)
-    pred_full_df = predict_full_life_cycles(fit, Q0, target_soh, Nlife, dod_ref, c_rate_ref)
+    pred_full_df = predict_full_life_cycles(fit, rated_capacity, target_soh, Nlife, dod_ref, c_rate_ref)
 
     result = {
         "Q0_ah_est": Q0,
+        "Rated_Cap_Ah": rated_capacity,
         "fit": fit,
         "ref_conditions": {"temp_c": ref_conditions["temp_c"],"dod": dod_ref,"c_rate": c_rate_ref,"soh_target": target_soh},
         "life_N_point": Nlife,
@@ -236,7 +240,7 @@ def run_pipeline(csv_file,cmap: ColumnMap,cfg: FitConfig,ref_conditions: Dict[st
     return result
 
 # ======================================
-# ✅ 纯净版网页界面 - ✅【新增CSV示例+字段解释】✅【修复中文显示】✅【保留所有你的修改】
+# ✅ 纯净版网页界面 - 全英文图表+新增额定容量输入框+保留所有你的修改
 # ======================================
 def main():
     st.markdown("""
@@ -250,42 +254,46 @@ def main():
 
     with col1:
         st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>⚙️ 参数配置</h4>", unsafe_allow_html=True)
-        target_soh = st.number_input("寿命终点SOH值", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
-        dod_ref = st.number_input("放电深度(DoD)", min_value=0.0, max_value=1.0, value=1.0, step=0.01, format="%.2f")
-        c_rate_ref = st.number_input("放电倍率(C-rate)", min_value=0.01, max_value=5.0, value=0.5, step=0.01, format="%.2f")
+        # ✅ ✔️ 核心新增：用户手动输入额定容量，必填项，0.01~10000Ah
+        rated_capacity = st.number_input("额定容量 (Rated Capacity) (Ah)", min_value=0.01, max_value=10000.0, value=200.0, step=0.01, format="%.2f")
+        target_soh = st.number_input("寿命终点SOH值 (Target SOH)", min_value=0.6, max_value=0.95, value=0.80, step=0.01, format="%.2f")
+        dod_ref = st.number_input("放电深度 (Depth of Discharge)", min_value=0.0, max_value=1.0, value=1.0, step=0.01, format="%.2f")
+        c_rate_ref = st.number_input("放电倍率 (C-rate)", min_value=0.01, max_value=5.0, value=0.5, step=0.01, format="%.2f")
 
         st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:20px'>📂 上传数据</h4>", unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("选择CSV文件", type="csv")
+        uploaded_file = st.file_uploader("选择CSV文件 (Select CSV File)", type="csv")
 
-        run_btn = st.button("开始预测", use_container_width=True, type="primary")
+        run_btn = st.button("开始预测 (Start Prediction)", use_container_width=True, type="primary")
 
     with col2:
         if run_btn and uploaded_file is not None:
             try:
-                with st.spinner("计算中..."):
+                with st.spinner("Calculating..."):
                     cfg = FitConfig(soh_target=target_soh)
                     ref_conditions = {"temp_c":25.0, "dod":dod_ref, "c_rate":c_rate_ref}
-                    all_result = run_pipeline(uploaded_file, cmap, cfg, ref_conditions)
+                    all_result = run_pipeline(uploaded_file, cmap, cfg, ref_conditions, rated_capacity)
                     fit_params = all_result["fit"]["params"]
                     life_cycle = int(all_result["life_N_point"])
                     ci_low, ci_high = int(all_result["life_N_CI95"][0]), int(all_result["life_N_CI95"][1])
                     Q0 = all_result["Q0_ah_est"]
+                    rated_cap = all_result["Rated_Cap_Ah"]
                     pred_df = all_result["predict_full_df"]
                     feat_df = all_result["feat_df"]
                     filter_df = all_result["fit"]["filtered_df"]
 
-                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>📊 预测结果</h4>", unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>📊 预测结果 (Prediction Results)</h4>", unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown(f"""
                     <div style='color: #2c3e50; font-size: 14px; line-height: 1.8;'>
-                    初始容量 Q0: {Q0:.3f} Ah | 有效拟合循环数: {all_result['fit']['n_used']} 个<br>
+                    初始容量 Q0: {Q0:.3f} Ah | 额定容量 Rated Capacity: {rated_cap:.3f} Ah<br>
+                    有效拟合循环数: {all_result['fit']['n_used']} <br>
                     目标SOH: {target_soh*100:.1f}% | 放电深度: {dod_ref*100:.1f}% | 放电倍率: {c_rate_ref}C<br>
-                    预测总循环数: <span style='color: #e67e22; font-weight: bold; font-size:15px;'>{life_cycle}</span> 次<br>
-                    95%置信区间: <span style='color: #e67e22;'>[{ci_low} ~ {ci_high}]</span> 次
+                    预测总循环数: <span style='color: #e67e22; font-weight: bold; font-size:15px;'>{life_cycle}</span> Cycles<br>
+                    95%置信区间 95%CI: <span style='color: #e67e22;'>[{ci_low} ~ {ci_high}]</span> Cycles
                     </div>
                     """, unsafe_allow_html=True)
 
-                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>⚙️ 模型参数</h4>", unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>⚙️ 模型参数 (Model Parameters)</h4>", unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown(f"""
                     <div style='color: #2c3e50; font-size: 13px; line-height: 1.8;'>
@@ -294,16 +302,17 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
 
-                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; marginTop:10px'>📈 SOH衰减曲线</h4>", unsafe_allow_html=True)
+                # ✅ ✔️ 完全纯英文图表，根治中文显示问题，所有文字都是英文
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; marginTop:10px'>📈 SOH Attenuation Curve</h4>", unsafe_allow_html=True)
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
-                ax.plot(feat_df["efc"], feat_df["soh"], 'b-', linewidth=2.0, label='实测SOH', alpha=0.9)
-                ax.plot(filter_df["efc"], 1-filter_df["dQ"], 'r--', linewidth=2.0, label='模型拟合SOH', alpha=0.9)
-                ax.plot(pred_df["预测循环数(EFC)"], pred_df["预测SOH"], 'orange', linestyle='-.', linewidth=2.0, label='全循环预测SOH', alpha=0.9)
-                ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2, label=f'寿命终点({target_soh*100}% SOH)')
-                ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8, label=f'预测总寿命: {life_cycle} 循环')
-                ax.set_title(f'SOH衰减曲线 (DoD={dod_ref}, C-rate={c_rate_ref})', fontsize=12, fontweight='bold', color='#2c3e50')
-                ax.set_xlabel("等效满充循环数 (EFC)", fontsize=11, color='#2c3e50')
-                ax.set_ylabel("电池健康状态 (SOH)", fontsize=11, color='#2c3e50')
+                ax.plot(feat_df["efc"], feat_df["soh"], 'b-', linewidth=2.0, label='Measured SOH', alpha=0.9)
+                ax.plot(filter_df["efc"], 1-filter_df["dQ"], 'r--', linewidth=2.0, label='Fitted SOH', alpha=0.9)
+                ax.plot(pred_df["Pred_EFC"], pred_df["Pred_SOH"], 'orange', linestyle='-.', linewidth=2.0, label='Predicted SOH', alpha=0.9)
+                ax.axhline(y=target_soh, color='#e74c3c', linestyle=':', linewidth=2, label=f'End of Life ({target_soh*100}% SOH)')
+                ax.axvline(x=life_cycle, color='#f39c12', linestyle=':', linewidth=1.8, label=f'Predicted Cycle Life: {life_cycle}')
+                ax.set_title(f'SOH Attenuation Curve (DOD={dod_ref}, C-rate={c_rate_ref})', fontsize=12, fontweight='bold', color='#2c3e50')
+                ax.set_xlabel("Equivalent Full Cycles (EFC)", fontsize=11, color='#2c3e50')
+                ax.set_ylabel("State of Health (SOH)", fontsize=11, color='#2c3e50')
                 ax.legend(loc='upper right', framealpha=0.9, facecolor='white', edgecolor='#bdc3c7')
                 ax.grid(True, alpha=0.5)
                 ax.set_ylim(0.55, 1.05)
@@ -311,31 +320,31 @@ def main():
                 ax.spines['right'].set_visible(False)
                 st.pyplot(fig)
 
-                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出</h4>", unsafe_allow_html=True)
-                real_data = feat_df[["cycle","capacity_ah","soh","dQ","c_rate","efc",cmap.temp_c,"Q0_ah"]].copy()
+                st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出 (Data Export)</h4>", unsafe_allow_html=True)
+                real_data = feat_df[["cycle","capacity_ah","soh","dQ","c_rate","efc",cmap.temp_c,"Q0_ah","Rated_Cap_Ah"]].copy()
                 real_data.rename(columns={
-                    "cycle":"实测循环数","capacity_ah":"实测容量(Ah)","soh":"实测SOH","dQ":"实测衰减量",
-                    "c_rate":"放电倍率","efc":"等效循环数",cmap.temp_c:"平均温度(℃)","Q0_ah":"初始容量(Ah)"
+                    "cycle":"Cycle","capacity_ah":"Capacity(Ah)","soh":"SOH","dQ":"Capacity_Decay",
+                    "c_rate":"C-rate","efc":"EFC",cmap.temp_c:"Avg_Temp(℃)","Q0_ah":"Initial_Capacity(Ah)","Rated_Cap_Ah":"Rated_Capacity(Ah)"
                 },inplace=True)
                 export_df = pd.concat([real_data, pred_df], ignore_index=True)
                 csv_data = export_df.to_csv(index=False, encoding="utf-8-sig").encode('utf-8-sig')
                 
                 st.download_button(
-                    label="下载完整预测数据",
+                    label="Download Prediction Data",
                     data=csv_data,
-                    file_name=f"储能电池寿命预测结果.csv",
+                    file_name=f"Energy_Storage_Battery_Life_Prediction.csv",
                     mime="text/csv",
                     use_container_width=True,
                     type="primary"
                 )
 
             except:
-                st.error("数据格式错误，请检查文件后重试")
+                st.error("数据格式错误，请检查文件后重试 (Data format error, please check the file)")
 
         elif run_btn:
-            st.warning("请先上传CSV文件")
+            st.warning("请先上传CSV文件 (Please upload a CSV file first)")
         else:
-            # ✅✅✅ 核心新增：初始空白页 显示 CSV上传格式示例 + 字段详细解释
+            # ✅ 保留CSV上传示例+字段解释，帮助用户正确传文件
             st.markdown("""
                 <div style='background-color: #f8f9fa; padding: 20px; border-radius: 8px; border:1px solid #e9ecef;'>
                 <h4 style='color: #2980b9; margin-top:0;'>📋 CSV文件上传格式说明（必填）</h4>
@@ -343,7 +352,6 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
             
-            # 构建CSV示例表格
             csv_example = pd.DataFrame({
                 "cycle": [1, 2, 3, 4, 5],
                 "capacity_ah": [200.0, 199.8, 199.7, 199.5, 199.3],
@@ -353,7 +361,6 @@ def main():
             })
             st.dataframe(csv_example, use_container_width=True, hide_index=True)
             
-            # 字段详细解释
             st.markdown("""
                 <div style='background-color: #f8f9fa; padding: 15px; border-radius: 8px; border:1px solid #e9ecef; margin-top:10px;'>
                 <h5 style='color: #27ae60; margin-top:0;'>📝 字段含义解释</h5>
