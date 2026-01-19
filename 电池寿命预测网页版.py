@@ -29,7 +29,7 @@ st.markdown(f"""
     <style>
         .fixed-logo {{
             position: fixed;
-            top: 30px;
+            top: 100px;
             right: 30px;
             width: 120px;
             z-index: 9999;
@@ -392,3 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
