@@ -123,7 +123,7 @@ def _model_log_dQ(params, N, dod, c_rate):
 
 def fit_life_model(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig):
     d = df_feat.copy()
-    d = d[(d["soh"] > 0.6) & (d["soh"] < 0.98)]
+    d = d[(d["soh"] > 0.6) & (d["soh"] < 1.20)]
     d = d[(d[cmap.temp_c] >= cfg.temp_min_c) & (d[cmap.temp_c] <= cfg.temp_max_c)]
     d = d[d[cmap.dod].astype(float) >= cfg.min_dod]
 
@@ -188,7 +188,7 @@ def bootstrap_life_ci(df_feat: pd.DataFrame, cmap: ColumnMap, cfg: FitConfig,
                       dod_ref: float, c_rate_ref: float) -> Tuple[float, float]:
     rng = np.random.default_rng(cfg.random_seed)
     d = df_feat.copy()
-    d = d[(d["soh"] > 0.6) & (d["soh"] < 0.98)]
+    d = d[(d["soh"] > 0.6) & (d["soh"] < 1.20)]
     d = d[(d[cmap.temp_c] >= cfg.temp_min_c) & (d[cmap.temp_c] <= cfg.temp_max_c)]
     d = d[d[cmap.dod].astype(float) >= cfg.min_dod].reset_index(drop=True)
 
@@ -392,4 +392,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
