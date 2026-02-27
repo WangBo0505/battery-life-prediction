@@ -258,7 +258,7 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
     return result
 
 # ======================================
-# 主界面（只改这里）
+# 主界面（动态绘图已修改为每秒200圈）
 # ======================================
 def main():
     st.markdown("""
@@ -310,10 +310,9 @@ def main():
 
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; marginTop:10px'>📈 SOH 衰减曲线</h4>", unsafe_allow_html=True)
 
-                # ========== 动态画图：慢慢出现 ==========
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
 
-                # 先画实测点
+                # 实测点
                 ax.scatter(linear_res["cycle_measured"], linear_res["soh_measured"], 
                            c='#2980b9', s=18, label='Actual SOH', alpha=0.85)
                 ax.axhline(y=target_soh, color='#e74c3c', linestyle='--', linewidth=2, 
@@ -326,22 +325,26 @@ def main():
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
 
-                # 占位图，用于更新
                 plot_placeholder = st.empty()
                 plot_placeholder.pyplot(fig)
 
-                # 预测曲线逐段画出来
+                # ======================
+                # 关键：每秒画 200 圈
+                # ======================
                 cycle_ext = linear_res["cycle_extended"]
                 soh_ext = linear_res["soh_extended"]
-                step = max(1, len(cycle_ext) // 60)  # 控制速度
 
-                for i in range(1, len(cycle_ext)+1, step):
-                    ax.plot(cycle_ext[:i], soh_ext[:i], 
-                            color='#e67e22', linewidth=2.5, label='Prediction' if i==1 else "")
+                cycles_per_second = 200
+                total_cycles = len(cycle_ext)
+                draw_steps = max(10, total_cycles // 50)  # 平滑度
+
+                for i in range(0, total_cycles, draw_steps):
+                    ax.plot(cycle_ext[:i+draw_steps], soh_ext[:i+draw_steps], 
+                            color='#e67e22', linewidth=2.5, label='Prediction' if i == 0 else "")
                     plot_placeholder.pyplot(fig)
-                    time.sleep(0.015)
+                    time.sleep(draw_steps / cycles_per_second)
 
-                # 最后画寿命线
+                # 最终寿命线
                 ax.axvline(x=life_cycle, color='#27ae60', linestyle=':', linewidth=2, 
                            label=f'Predicted Life: {life_cycle} cycles')
                 ax.legend(loc='upper right')
