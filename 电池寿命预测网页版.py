@@ -258,7 +258,7 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
     return result
 
 # ======================================
-# 主界面（动态绘图已修改为每秒200圈）
+# 主界面（动态绘图已修改为每秒200圈，纵坐标改为60%-100%）
 # ======================================
 def main():
     st.markdown("""
@@ -319,7 +319,8 @@ def main():
                            label=f'End of Life ({target_soh*100:.1f}% SOH)')
                 ax.set_xlabel("Cycle")
                 ax.set_ylabel("SOH")
-                ax.set_ylim(0.58, 1.05)
+                # 修改纵坐标范围：从 78%-105% 改为 60%-100%
+                ax.set_ylim(0.6, 1.0)
                 ax.grid(True, alpha=0.4)
                 ax.legend(loc='upper right')
                 ax.spines['top'].set_visible(False)
@@ -329,7 +330,7 @@ def main():
                 plot_placeholder.pyplot(fig)
 
                 # ======================
-                # 关键：每秒画 200 圈
+                # 动态绘制预测曲线，每秒画 200 圈
                 # ======================
                 cycle_ext = linear_res["cycle_extended"]
                 soh_ext = linear_res["soh_extended"]
