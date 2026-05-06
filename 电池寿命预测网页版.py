@@ -319,7 +319,7 @@ def main():
                            label=f'End of Life ({target_soh*100:.1f}% SOH)')
                 ax.set_xlabel("Cycle")
                 ax.set_ylabel("SOH")
-                ax.set_ylim(0.78, 1.05)
+                ax.set_ylim(0.58, 1.05)
                 ax.grid(True, alpha=0.4)
                 ax.legend(loc='upper right')
                 ax.spines['top'].set_visible(False)
