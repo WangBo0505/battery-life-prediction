@@ -7,6 +7,7 @@ from scipy.signal import savgol_filter
 from scipy.ndimage import median_filter
 import matplotlib.pyplot as plt
 import streamlit as st
+import time
 
 # ===================== 全局配置 =====================
 st.set_page_config(
@@ -43,7 +44,7 @@ plt.rcParams['grid.color'] = '#ecf0f1'
 plt.rcParams['grid.alpha'] = 0.8
 
 # ======================================
-# 模型代码（全部保留）
+# 模型代码（全部保留，不改动）
 # ======================================
 R_GAS = 8.314462618
 
@@ -216,7 +217,8 @@ def linear_fit_decay(df: pd.DataFrame, soh_target: float = 0.80) -> Dict:
     cycle_end = max(cycle_end, 1)
     cycle_ext = np.arange(1, int(cycle_end) + 1)
     soh_ext = k * cycle_ext + b
-    soh_ext = np.clip(soh_ext, 0.78, 1.05)
+    # 移除固定上限，完整画到目标SOH
+    soh_ext = np.clip(soh_ext, soh_target - 0.05, 1.05)
     pred_df = pd.DataFrame({
         "Pred_EFC": cycle_ext.astype(int),
         "Pred_SOH": soh_ext,
@@ -257,7 +259,7 @@ def run_pipeline(csv_file, cmap: ColumnMap, cfg: FitConfig, ref_conditions: Dict
     return result
 
 # ======================================
-# 主界面（移除动态绘图，直接出图；增加模型参数显示）
+# 主界面（动态绘图已修改为自动适配任意SOH目标）
 # ======================================
 def main():
     st.markdown("""
@@ -293,13 +295,7 @@ def main():
                     Q0_linear = linear_res["Q0"]
                     rated_cap = all_result["Rated_Cap_Ah"]
                     pred_df = linear_res["predict_full_df"]
-
-                    # 获取半经验模型拟合参数
-                    semi_params = all_result["semi_fit"]["params"]
-                    k_val = semi_params["k"]
-                    alpha_val = semi_params["alpha"]
-                    beta_val = semi_params["beta_dod"]
-                    gamma_val = semi_params["gamma_crate"]
+                    feat_df = all_result["semi_feat_df"]
 
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px'>📊 预测结果</h4>", unsafe_allow_html=True)
                 with st.container(border=True):
@@ -313,44 +309,52 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
 
-                # 增加模型参数显示区域
-                with st.container(border=True):
-                    st.markdown("**🔬 拟合的电化学衰减模型参数**")
-                    st.markdown(f"""
-                    <div style='color: #2c3e50; font-size: 14px; line-height: 1.6;'>
-                    k = {k_val:.6e}<br>
-                    α (alpha) = {alpha_val:.6f}<br>
-                    β (beta) = {beta_val:.6f}<br>
-                    γ (gamma) = {gamma_val:.6f}
-                    </div>
-                    """, unsafe_allow_html=True)
-
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; marginTop:10px'>📈 SOH 衰减曲线</h4>", unsafe_allow_html=True)
 
-                # 静态绘制完整预测曲线
                 fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
 
                 # 实测点
                 ax.scatter(linear_res["cycle_measured"], linear_res["soh_measured"], 
                            c='#2980b9', s=18, label='Actual SOH', alpha=0.85)
-                # 预测曲线（完整延伸）
-                cycle_ext = linear_res["cycle_extended"]
-                soh_ext = linear_res["soh_extended"]
-                ax.plot(cycle_ext, soh_ext, color='#e67e22', linewidth=2.5, label='Prediction')
-                # 寿命终点线
                 ax.axhline(y=target_soh, color='#e74c3c', linestyle='--', linewidth=2, 
                            label=f'End of Life ({target_soh*100:.1f}% SOH)')
-                ax.axvline(x=life_cycle, color='#27ae60', linestyle=':', linewidth=2, 
-                           label=f'Predicted Life: {life_cycle} cycles')
+                
+                # ======================
+                # 动态Y轴范围（自动适配）
+                # ======================
+                y_min = max(0.5, target_soh - 0.05)  # 比目标低5%，保证完整显示
+                ax.set_ylim(y_min, 1.05)
                 ax.set_xlabel("Cycle")
                 ax.set_ylabel("SOH")
-                ax.set_ylim(0.6, 1.0)   # 纵坐标 60% ~ 100%
                 ax.grid(True, alpha=0.4)
                 ax.legend(loc='upper right')
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
 
-                st.pyplot(fig)
+                plot_placeholder = st.empty()
+                plot_placeholder.pyplot(fig)
+
+                # ======================
+                # 动态绘制完整曲线
+                # ======================
+                cycle_ext = linear_res["cycle_extended"]
+                soh_ext = linear_res["soh_extended"]
+
+                cycles_per_second = 200
+                total_cycles = len(cycle_ext)
+                draw_steps = max(10, total_cycles // 50)
+
+                for i in range(0, total_cycles, draw_steps):
+                    ax.plot(cycle_ext[:i+draw_steps], soh_ext[:i+draw_steps], 
+                            color='#e67e22', linewidth=2.5, label='Prediction' if i == 0 else "")
+                    plot_placeholder.pyplot(fig)
+                    time.sleep(draw_steps / cycles_per_second)
+
+                # 最终寿命标记
+                ax.axvline(x=life_cycle, color='#27ae60', linestyle=':', linewidth=2, 
+                           label=f'Predicted Life: {life_cycle} cycles')
+                ax.legend(loc='upper right')
+                plot_placeholder.pyplot(fig)
 
                 # 导出
                 st.markdown("<h4 style='color: #2980b9; border-bottom:2px solid #3498db; padding-bottom:5px; margin-top:10px'>💾 数据导出</h4>", unsafe_allow_html=True)
